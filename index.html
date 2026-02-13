@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inversor Pro - Controlo Bluetooth</title>
+    <!-- Dependências via CDN para funcionar no GitHub Pages sem instalação -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/lucide-static@0.321.0/font/lucide.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #0f172a; margin: 0; }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- UTILITÁRIOS MODBUS ---
+        const calculateCRC = (buffer) => {
+            let crc = 0xFFFF;
+            for (let pos = 0; pos < buffer.length; pos++) {
+                crc ^= buffer[pos];
+                for (let i = 8; i !== 0; i--) {
+                    if ((crc & 0x0001) !== 0) crc = (crc >> 1) ^ 0xA001;
+                    else crc >>= 1;
+                }
+            }
+            return [(crc & 0xFF), ((crc >> 8) & 0xFF)];
+        };
+
+        const buf2hex = (buffer) => {
+            return [...new Uint8Array(buffer)].map(x => x.toString(16).padStart(2, '0')).join(' ').toUpperCase();
+        };
+
+        function App() {
+            const [isConnected, setIsConnected] = useState(false);
+            const [characteristic, setCharacteristic] = useState(null);
+            const [isDemoMode, setIsDemoMode] = useState(false);
+            const [logs, setLogs] = useState([]);
+            const [slaveId, setSlaveId] = useState(1);
+            const [params, setParams] = useState([
+                { id: 1, name: 'Frequência Alvo', address: 100, value: 0 },
+                { id: 2, name: 'Rampa Aceleração', address: 101, value: 0 },
+                { id: 3, name: 'Corrente Saída', address: 102, value: 0 },
+            ]);
+
+            const logEndRef = useRef(null);
+            const serviceUUID = "0000ffe0-0000-1000-8000-00805f9b34fb";
+            const charUUID = "0000ffe1-0000-1000-8000-00805f9b34fb";
+
+            useEffect(() => {
+                if (window.lucide) window.lucide.createIcons();
+                logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+            }, [logs]);
+
+            const addLog = (type, message) => {
+                const timestamp = new Date().toLocaleTimeString();
+                setLogs(prev => [...prev.slice(-15), { type, message, timestamp }]);
+            };
+
+            const connectBluetooth = async () => {
+                if (isDemoMode) {
+                    setIsConnected(true);
+                    addLog('success', 'Modo Simulação Ativado');
+                    return;
+                }
+
+                try {
+                    const device = await navigator.bluetooth.requestDevice({
+                        filters: [{ namePrefix: 'HM' }, { namePrefix: 'BT' }, { namePrefix: 'JDY' }],
+                        optionalServices: [serviceUUID]
+                    });
+                    const server = await device.gatt.connect();
+                    const service = await server.getPrimaryService(serviceUUID);
+                    const char = await service.getCharacteristic(charUUID);
+                    
+                    setCharacteristic(char);
+                    setIsConnected(true);
+                    addLog('success', `Conectado a ${device.name}`);
+                } catch (err) {
+                    addLog('error', `Erro: ${err.message}`);
+                }
+            };
+
+            const sendModbus = async (type, idx) => {
+                const p = params[idx];
+                const addr = parseInt(p.address);
+                const val = parseInt(p.value);
+
+                if (isDemoMode) {
+                    addLog('tx', `Simulado: ${type} no Reg ${addr}`);
+                    return;
+                }
+
+                if (!characteristic) return addLog('error', 'Bluetooth não conectado');
+
+                const payload = type === 'read' 
+                    ? [slaveId, 0x03, (addr >> 8) & 0xFF, addr & 0xFF, 0x00, 0x01]
+                    : [slaveId, 0x06, (addr >> 8) & 0xFF, addr & 0xFF, (val >> 8) & 0xFF, val & 0xFF];
+                
+                const crc = calculateCRC(payload);
+                const buffer = new Uint8Array([...payload, ...crc]);
+
+                try {
+                    await characteristic.writeValue(buffer);
+                    addLog('tx', `Enviado: ${buf2hex(buffer)}`);
+                } catch (e) { addLog('error', e.message); }
+            };
+
+            const updateParam = (idx, field, val) => {
+                const copy = [...params];
+                copy[idx][field] = val;
+                setParams(copy);
+            };
+
+            return (
+                <div className="max-w-md mx-auto min-h-screen flex flex-col p-4 text-slate-200">
+                    <header className="flex justify-between items-center mb-6 bg-slate-800 p-4 rounded-xl shadow-lg border border-slate-700">
+                        <h1 className="text-xl font-bold flex items-center gap-2 text-blue-400">
+                             Inversor Pro
+                        </h1>
+                        <button 
+                            onClick={connectBluetooth}
+                            className={`px-4 py-2 rounded-lg font-bold transition-all ${isConnected ? 'bg-green-600/20 text-green-400' : 'bg-blue-600 text-white'}`}
+                        >
+                            {isConnected ? 'Ligado' : 'Conectar'}
+                        </button>
+                    </header>
+
+                    <div className="flex gap-2 mb-4">
+                        <button 
+                            onClick={() => !isConnected && setIsDemoMode(!isDemoMode)}
+                            className={`text-[10px] px-3 py-1 rounded-full border transition-all ${isDemoMode ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'border-slate-700 text-slate-500'}`}
+                        >
+                            {isDemoMode ? '🛠 MODO SIMULAÇÃO ATIVO' : '📡 MODO HARDWARE REAL'}
+                        </button>
+                    </div>
+
+                    <div className="space-y-4 mb-6">
+                        {params.map((p, i) => (
+                            <div key={p.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                                <div className="text-xs font-bold text-slate-500 mb-3 uppercase tracking-wider">{p.name}</div>
+                                <div className="grid grid-cols-2 gap-2 mb-3">
+                                    <input type="number" value={p.address} onChange={e => updateParam(i, 'address', e.target.value)} className="bg-slate-900 border border-slate-700 p-2 rounded text-sm outline-none focus:border-blue-500" placeholder="Endereço"/>
+                                    <input type="number" value={p.value} onChange={e => updateParam(i, 'value', e.target.value)} className="bg-slate-900 border border-slate-700 p-2 rounded text-sm text-blue-400 font-bold outline-none focus:border-blue-500" placeholder="Valor"/>
+                                </div>
+                                <div className="flex gap-2">
+                                    <button onClick={() => sendModbus('read', i)} className="flex-1 bg-slate-700 py-2 rounded text-xs font-bold">LER</button>
+                                    <button onClick={() => sendModbus('write', i)} className="flex-1 bg-blue-600 py-2 rounded text-xs font-bold text-white">GRAVAR</button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="mt-auto bg-black rounded-xl border border-slate-800 overflow-hidden">
+                        <div className="bg-slate-800 px-4 py-2 text-[10px] font-bold text-slate-500 border-b border-slate-700">TERMINAL LOG</div>
+                        <div className="h-40 p-3 font-mono text-[10px] overflow-y-auto custom-scrollbar space-y-1">
+                            {logs.map((log, i) => (
+                                <div key={i} className={log.type === 'tx' ? 'text-blue-400' : log.type === 'rx' ? 'text-green-400' : 'text-slate-500'}>
+                                    [{log.timestamp}] {log.message}
+                                </div>
+                            ))}
+                            <div ref={logEndRef} />
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
