@@ -46,6 +46,9 @@
             const [isDemoMode, setIsDemoMode] = useState(false);
             const [logs, setLogs] = useState([]);
             const [slaveId, setSlaveId] = useState(1);
+            const [timeout, setTimeoutVal] = useState(1000);
+            const [showAdvanced, setShowAdvanced] = useState(false);
+            
             const [params, setParams] = useState([
                 { id: 1, name: 'Frequência Alvo', address: 100, value: 0 },
                 { id: 2, name: 'Rampa Aceleração', address: 101, value: 0 },
@@ -75,18 +78,17 @@
                 setLogs(prev => [...prev.slice(-25), { type, message, timestamp }]);
             };
 
-            // Função para processar dados recebidos do Inversor
             const handleData = (event) => {
                 const value = event.target.value;
                 const hex = buf2hex(value.buffer);
                 addLog('info', `RX: ${hex}`);
                 
-                // Lógica básica para extrair valor de resposta Modbus Read (Function 03)
-                // [ID][03][Bytes][ValH][ValL][CRCL][CRCH]
                 const data = new Uint8Array(value.buffer);
                 if (data.length >= 5 && data[1] === 0x03) {
-                    const resultVal = (data[3] << 8) | data[4];
-                    addLog('success', `Valor lido: ${resultVal}`);
+                    if (data[0] === parseInt(slaveId)) {
+                        const resultVal = (data[3] << 8) | data[4];
+                        addLog('success', `Valor lido (Reg): ${resultVal}`);
+                    }
                 }
             };
 
@@ -98,8 +100,7 @@
                 }
 
                 try {
-                    addLog('info', 'A iniciar busca exaustiva...');
-                    
+                    addLog('info', 'Buscando CFW900...');
                     const device = await navigator.bluetooth.requestDevice({
                         filters: [{ namePrefix: 'CFW' }, { namePrefix: 'WEG' }],
                         optionalServices: serviceUUIDs
@@ -110,11 +111,8 @@
                         });
                     });
 
-                    addLog('info', `Ligando ao GATT: ${device.name || 'Dispositivo'}...`);
                     const server = await device.gatt.connect();
-                    
-                    addLog('info', 'Explorando serviços...');
-                    await new Promise(resolve => setTimeout(resolve, 600));
+                    await new Promise(r => setTimeout(r, 600));
 
                     const services = await server.getPrimaryServices();
                     let foundChar = null;
@@ -124,11 +122,9 @@
                             const characteristics = await service.getCharacteristics();
                             for (const char of characteristics) {
                                 if (char.properties.write || char.properties.writeWithoutResponse) {
-                                    // Ativa notificações para receber resposta do Modbus
                                     if (char.properties.notify || char.properties.indicate) {
                                         await char.startNotifications();
                                         char.addEventListener('characteristicvaluechanged', handleData);
-                                        addLog('info', 'Notificações ativadas no canal.');
                                     }
                                     foundChar = char;
                                     break;
@@ -138,16 +134,16 @@
                         if (foundChar) break;
                     }
 
-                    if (!foundChar) throw new Error("Porta de comunicação não encontrada.");
+                    if (!foundChar) throw new Error("Canal de dados não encontrado.");
                     
                     setCharacteristic(foundChar);
                     setIsConnected(true);
-                    addLog('success', `Conectado ao CFW900!`);
+                    addLog('success', `Conectado!`);
                     
                     device.addEventListener('gattserverdisconnected', () => {
                         setIsConnected(false);
                         setCharacteristic(null);
-                        addLog('error', 'Conexão perdida.');
+                        addLog('error', 'Desconectado.');
                     });
 
                 } catch (err) {
@@ -161,28 +157,27 @@
                     return;
                 }
 
-                if (!characteristic) return addLog('error', 'Sem conexão Bluetooth.');
+                if (!characteristic) return addLog('error', 'Sem conexão.');
 
                 const p = params[idx];
                 const addr = parseInt(p.address);
                 const val = parseInt(p.value);
+                const sId = parseInt(slaveId);
 
                 const payload = type === 'read' 
-                    ? [slaveId, 0x03, (addr >> 8) & 0xFF, addr & 0xFF, 0x00, 0x01]
-                    : [slaveId, 0x06, (addr >> 8) & 0xFF, addr & 0xFF, (val >> 8) & 0xFF, val & 0xFF];
+                    ? [sId, 0x03, (addr >> 8) & 0xFF, addr & 0xFF, 0x00, 0x01]
+                    : [sId, 0x06, (addr >> 8) & 0xFF, addr & 0xFF, (val >> 8) & 0xFF, val & 0xFF];
                 
                 const crc = calculateCRC(payload);
                 const buffer = new Uint8Array([...payload, ...crc]);
 
                 try {
                     addLog('info', `TX: ${buf2hex(buffer)}`);
-                    if (characteristic.properties.writeWithoutResponse) {
-                        await characteristic.writeValueWithoutResponse(buffer);
-                    } else {
-                        await characteristic.writeValue(buffer);
-                    }
+                    await (characteristic.properties.writeWithoutResponse 
+                        ? characteristic.writeValueWithoutResponse(buffer) 
+                        : characteristic.writeValue(buffer));
                 } catch (e) { 
-                    addLog('error', `Erro de escrita: ${e.message}`); 
+                    addLog('error', `Erro: ${e.message}`); 
                 }
             };
 
@@ -197,18 +192,58 @@
                     <header className="flex justify-between items-center mb-6 bg-slate-800 p-4 rounded-xl shadow-lg border border-slate-700">
                         <div className="flex flex-col">
                             <h1 className="text-xl font-bold text-blue-400">Inversor Pro</h1>
-                            <span className="text-[9px] text-slate-500 font-mono">WEG CFW900 ANALYZER</span>
+                            <span className="text-[9px] text-slate-500 font-mono tracking-widest uppercase">WEG Bluetooth Modbus</span>
                         </div>
                         <button 
                             onClick={connectBluetooth}
-                            className={`px-4 py-2 rounded-lg font-bold transition-all ${isConnected ? 'bg-green-600/20 text-green-400 border border-green-500/50' : 'bg-blue-600 text-white hover:bg-blue-500'}`}
+                            className={`px-4 py-2 rounded-lg font-bold transition-all shadow-md active:scale-95 ${isConnected ? 'bg-green-600/20 text-green-400 border border-green-500/50' : 'bg-blue-600 text-white'}`}
                         >
-                            {isConnected ? 'LIGADO' : 'CONECTAR'}
+                            {isConnected ? 'ON' : 'OFF'}
                         </button>
                     </header>
 
-                    <div className="bg-blue-900/20 border border-blue-500/30 p-3 rounded-lg mb-4 text-[10px] text-blue-300">
-                        📋 <strong>Info:</strong> Verifique se o Slave ID do Inversor é 1. Se não for, os comandos serão ignorados pelo hardware.
+                    {/* Painel de Configurações */}
+                    <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-xl mb-4 shadow-inner">
+                        <div className="flex items-center justify-between mb-2">
+                            <span className="text-[10px] font-bold text-slate-500 uppercase">Configurações Base</span>
+                            <button 
+                                onClick={() => setShowAdvanced(!showAdvanced)}
+                                className="text-[9px] text-blue-500 hover:underline uppercase"
+                            >
+                                {showAdvanced ? 'Esconder' : 'Avançado'}
+                            </button>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 gap-4">
+                            <div className="flex flex-col">
+                                <label className="text-[9px] text-slate-400 mb-1">SLAVE ID</label>
+                                <input 
+                                    type="number" 
+                                    value={slaveId} 
+                                    onChange={(e) => setSlaveId(e.target.value)}
+                                    className="bg-slate-900 border border-slate-700 p-2 rounded text-center font-bold text-white focus:border-blue-500 outline-none"
+                                />
+                            </div>
+                            <div className="flex flex-col">
+                                <label className="text-[9px] text-slate-400 mb-1">TIMEOUT (ms)</label>
+                                <input 
+                                    type="number" 
+                                    value={timeout} 
+                                    onChange={(e) => setTimeoutVal(e.target.value)}
+                                    className="bg-slate-900 border border-slate-700 p-2 rounded text-center font-bold text-white focus:border-blue-500 outline-none"
+                                />
+                            </div>
+                        </div>
+
+                        {showAdvanced && (
+                            <div className="mt-4 pt-4 border-t border-slate-700/50 grid grid-cols-2 gap-2 text-[8px] text-slate-500 font-mono">
+                                <div className="bg-slate-900/50 p-2 rounded border border-slate-800">BAUD RATE: 115200*</div>
+                                <div className="bg-slate-900/50 p-2 rounded border border-slate-800">DATA BITS: 8</div>
+                                <div className="bg-slate-900/50 p-2 rounded border border-slate-800">STOP BITS: 1</div>
+                                <div className="bg-slate-900/50 p-2 rounded border border-slate-800">PARITY: NONE</div>
+                                <div className="col-span-2 mt-1 text-center italic">*Gerido pela pilha Bluetooth Low Energy</div>
+                            </div>
+                        )}
                     </div>
 
                     <div className="flex gap-2 mb-4">
@@ -216,45 +251,52 @@
                             onClick={() => !isConnected && setIsDemoMode(!isDemoMode)}
                             className={`text-[10px] px-3 py-1 rounded-full border transition-all ${isDemoMode ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'border-slate-700 text-slate-500'}`}
                         >
-                            {isDemoMode ? '🛠 SIMULAÇÃO' : '📡 HARDWARE'}
+                            {isDemoMode ? '🛠 MODO SIMULAÇÃO' : '📡 MODO HARDWARE'}
                         </button>
                     </div>
 
-                    <div className="space-y-4 mb-6">
+                    <div className="space-y-4 mb-6 flex-1 overflow-y-auto custom-scrollbar pr-1">
                         {params.map((p, i) => (
-                            <div key={p.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700">
-                                <div className="text-xs font-bold text-slate-500 mb-3 uppercase flex justify-between">
+                            <div key={p.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-lg">
+                                <div className="text-xs font-bold text-slate-400 mb-3 uppercase flex justify-between">
                                     <span>{p.name}</span>
-                                    <span className="text-blue-500/30 text-[9px]">REG: {p.address}</span>
+                                    <span className="text-blue-500/20 text-[9px]">HEX ADDR: 0x{parseInt(p.address).toString(16).toUpperCase()}</span>
                                 </div>
                                 <div className="grid grid-cols-2 gap-3 mb-4">
-                                    <input type="number" value={p.address} onChange={e => updateParam(i, 'address', e.target.value)} className="bg-slate-900 border border-slate-700 p-2 rounded text-sm outline-none focus:border-blue-500 text-white" />
-                                    <input type="number" value={p.value} onChange={e => updateParam(i, 'value', e.target.value)} className="bg-slate-900 border border-slate-700 p-2 rounded text-sm text-blue-400 font-bold outline-none focus:border-blue-500" />
+                                    <div className="space-y-1">
+                                        <label className="text-[9px] text-slate-600 ml-1">REGISTO (DEC)</label>
+                                        <input type="number" value={p.address} onChange={e => updateParam(i, 'address', e.target.value)} className="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white" />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="text-[9px] text-slate-600 ml-1">VALOR</label>
+                                        <input type="number" value={p.value} onChange={e => updateParam(i, 'value', e.target.value)} className="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-blue-400 font-bold" />
+                                    </div>
                                 </div>
                                 <div className="flex gap-2">
-                                    <button onClick={() => sendModbus('read', i)} className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded text-xs font-bold transition-colors">LER</button>
-                                    <button onClick={() => sendModbus('write', i)} className="flex-1 bg-blue-600 hover:bg-blue-500 py-2 rounded text-xs font-bold text-white transition-colors">GRAVAR</button>
+                                    <button onClick={() => sendModbus('read', i)} className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded text-xs font-bold">LER</button>
+                                    <button onClick={() => sendModbus('write', i)} className="flex-1 bg-blue-600 hover:bg-blue-500 py-2 rounded text-xs font-bold text-white uppercase tracking-tighter">Gravar Registro</button>
                                 </div>
                             </div>
                         ))}
                     </div>
 
-                    <div className="mt-auto bg-[#0a0f1d] rounded-xl border border-slate-800 overflow-hidden shadow-2xl">
+                    <div className="bg-[#0a0f1d] rounded-xl border border-slate-800 overflow-hidden shadow-2xl shrink-0">
                         <div className="bg-slate-800/80 px-4 py-2 text-[10px] font-bold text-slate-400 border-b border-slate-700 flex justify-between items-center">
-                            <span>TERMINAL</span>
+                            <span>MONITOR SERIAL (CRC VALIDATED)</span>
                             <button onClick={() => setLogs([])} className="text-[9px] hover:text-white uppercase">Limpar</button>
                         </div>
-                        <div className="h-48 p-3 font-mono text-[10px] overflow-y-auto custom-scrollbar space-y-1">
+                        <div className="h-40 p-3 font-mono text-[10px] overflow-y-auto custom-scrollbar space-y-1">
                             {logs.map((log, i) => (
                                 <div key={i} className={
                                     log.type === 'tx' ? 'text-blue-400 font-bold' : 
                                     log.type === 'success' ? 'text-green-400' : 
                                     log.type === 'error' ? 'text-red-400 font-bold' : 
-                                    log.type === 'info' ? 'text-amber-200/70' : 'text-slate-500'
+                                    log.type === 'info' ? 'text-slate-400' : 'text-slate-600'
                                 }>
                                     <span className="opacity-30">[{log.timestamp}]</span> {log.message}
                                 </div>
                             ))}
+                            <div ref={logEndRef} />
                         </div>
                     </div>
                 </div>
