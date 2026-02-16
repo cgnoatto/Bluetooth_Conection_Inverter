@@ -53,6 +53,8 @@
             ]);
 
             const logEndRef = useRef(null);
+            
+            // UUIDs comuns para módulos BLE e inversores com interface BT
             const serviceUUID = "0000ffe0-0000-1000-8000-00805f9b34fb";
             const charUUID = "0000ffe1-0000-1000-8000-00805f9b34fb";
 
@@ -74,23 +76,39 @@
                 }
 
                 try {
-                    addLog('info', 'A procurar dispositivos (Ligue o GPS)...');
+                    addLog('info', 'A procurar CFW900 e outros... (Ligue o GPS)');
                     
-                    // Filtro ampliado: Tenta encontrar pelo serviço ou aceita todos os dispositivos se necessário
+                    // Configuração de busca otimizada para o CFW900
+                    const options = {
+                        filters: [
+                            { namePrefix: 'CFW' },
+                            { namePrefix: 'WEG' },
+                            { namePrefix: 'HM' }
+                        ],
+                        optionalServices: [serviceUUID, "00001800", "00001801"]
+                    };
+
+                    // Se não encontrar com filtros, tentamos o modo abrangente
                     const device = await navigator.bluetooth.requestDevice({
                         acceptAllDevices: true,
                         optionalServices: [serviceUUID]
+                    }).catch(async (err) => {
+                        addLog('info', 'Tentando modo de busca alternativa...');
+                        return await navigator.bluetooth.requestDevice(options);
                     });
 
                     addLog('info', `A ligar a: ${device.name || 'Dispositivo sem nome'}...`);
                     
                     const server = await device.gatt.connect();
+                    
+                    // Tenta encontrar o serviço primário. 
+                    // Se o CFW900 usar um UUID diferente, o log de erro ajudará a identificar.
                     const service = await server.getPrimaryService(serviceUUID);
                     const char = await service.getCharacteristic(charUUID);
                     
                     setCharacteristic(char);
                     setIsConnected(true);
-                    addLog('success', `Conectado: ${device.name || 'OK'}`);
+                    addLog('success', `Conectado: ${device.name || 'CFW900 OK'}`);
                     
                     device.addEventListener('gattserverdisconnected', () => {
                         setIsConnected(false);
@@ -99,7 +117,7 @@
 
                 } catch (err) {
                     addLog('error', `Falha: ${err.message}`);
-                    console.error(err);
+                    addLog('info', 'Dica: Verifique se o Inversor está em modo de emparelhamento.');
                 }
             };
 
@@ -142,14 +160,14 @@
                         </h1>
                         <button 
                             onClick={connectBluetooth}
-                            className={`px-4 py-2 rounded-lg font-bold transition-all ${isConnected ? 'bg-green-600/20 text-green-400' : 'bg-blue-600 text-white'}`}
+                            className={`px-4 py-2 rounded-lg font-bold transition-all ${isConnected ? 'bg-green-600/20 text-green-400' : 'bg-blue-600 text-white active:scale-95'}`}
                         >
                             {isConnected ? 'Ligado' : 'Conectar'}
                         </button>
                     </header>
 
                     <div className="bg-blue-900/20 border border-blue-500/30 p-3 rounded-lg mb-4 text-[10px] text-blue-300">
-                        💡 <strong>Dica:</strong> Se não encontrar o dispositivo, verifique se o <strong>GPS (Localização)</strong> está ligado e se o dispositivo não está pareado nas definições do sistema.
+                        💡 <strong>Dica CFW900:</strong> Certifique-se que o Bluetooth do inversor está habilitado nos parâmetros do equipamento (geralmente P0850 ou similar).
                     </div>
 
                     <div className="flex gap-2 mb-4">
