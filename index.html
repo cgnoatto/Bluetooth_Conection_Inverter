@@ -54,9 +54,12 @@
 
             const logEndRef = useRef(null);
             
-            // UUIDs comuns para módulos BLE e inversores com interface BT
-            const serviceUUID = "0000ffe0-0000-1000-8000-00805f9b34fb";
-            const charUUID = "0000ffe1-0000-1000-8000-00805f9b34fb";
+            // UUIDs Candidatos para o CFW900 (Muitos usam GATT Serial ou Custom)
+            const serviceUUIDs = [
+                "0000ffe0-0000-1000-8000-00805f9b34fb", // Padrão Genérico
+                "49535343-fe7d-4ae5-8fa9-9fafd205e455", // Microchip (usado em alguns WEG)
+                "0000fff0-0000-1000-8000-00805f9b34fb"  // Outro comum
+            ];
 
             useEffect(() => {
                 if (window.lucide) window.lucide.createIcons();
@@ -65,7 +68,7 @@
 
             const addLog = (type, message) => {
                 const timestamp = new Date().toLocaleTimeString();
-                setLogs(prev => [...prev.slice(-15), { type, message, timestamp }]);
+                setLogs(prev => [...prev.slice(-20), { type, message, timestamp }]);
             };
 
             const connectBluetooth = async () => {
@@ -76,48 +79,60 @@
                 }
 
                 try {
-                    addLog('info', 'A procurar CFW900 e outros... (Ligue o GPS)');
+                    addLog('info', 'Iniciando busca profunda...');
                     
-                    // Configuração de busca otimizada para o CFW900
-                    const options = {
-                        filters: [
-                            { namePrefix: 'CFW' },
-                            { namePrefix: 'WEG' },
-                            { namePrefix: 'HM' }
-                        ],
-                        optionalServices: [serviceUUID, "00001800", "00001801"]
-                    };
-
-                    // Se não encontrar com filtros, tentamos o modo abrangente
                     const device = await navigator.bluetooth.requestDevice({
                         acceptAllDevices: true,
-                        optionalServices: [serviceUUID]
-                    }).catch(async (err) => {
-                        addLog('info', 'Tentando modo de busca alternativa...');
-                        return await navigator.bluetooth.requestDevice(options);
+                        optionalServices: serviceUUIDs // Registramos os prováveis serviços
                     });
 
-                    addLog('info', `A ligar a: ${device.name || 'Dispositivo sem nome'}...`);
-                    
+                    addLog('info', `Conectando ao GATT de ${device.name || 'CFW900'}...`);
                     const server = await device.gatt.connect();
                     
-                    // Tenta encontrar o serviço primário. 
-                    // Se o CFW900 usar um UUID diferente, o log de erro ajudará a identificar.
-                    const service = await server.getPrimaryService(serviceUUID);
-                    const char = await service.getCharacteristic(charUUID);
+                    addLog('info', 'Escaneando serviços disponíveis...');
+                    const services = await server.getPrimaryServices();
                     
-                    setCharacteristic(char);
+                    if (services.length === 0) {
+                        throw new Error("Nenhum serviço primário encontrado!");
+                    }
+
+                    addLog('info', `Encontrados ${services.length} serviços.`);
+                    
+                    // Vamos tentar iterar pelos serviços até encontrar uma característica de escrita
+                    let foundChar = null;
+
+                    for (const service of services) {
+                        addLog('info', `Serviço: ${service.uuid}`);
+                        try {
+                            const chars = await service.getCharacteristics();
+                            for (const c of chars) {
+                                // Procuramos uma característica que suporte Escrita (Write)
+                                if (c.properties.write || c.properties.writeWithoutResponse) {
+                                    addLog('success', `Candidato encontrado no serviço ${service.uuid.substring(0,8)}`);
+                                    foundChar = c;
+                                    break;
+                                }
+                            }
+                        } catch (e) { continue; }
+                        if (foundChar) break;
+                    }
+
+                    if (!foundChar) {
+                        throw new Error("Nenhum canal de escrita Modbus detectado.");
+                    }
+                    
+                    setCharacteristic(foundChar);
                     setIsConnected(true);
-                    addLog('success', `Conectado: ${device.name || 'CFW900 OK'}`);
+                    addLog('success', `Conectado e Pronto!`);
                     
                     device.addEventListener('gattserverdisconnected', () => {
                         setIsConnected(false);
-                        addLog('error', 'Dispositivo desconectado.');
+                        addLog('error', 'Inversor desconectado.');
                     });
 
                 } catch (err) {
                     addLog('error', `Falha: ${err.message}`);
-                    addLog('info', 'Dica: Verifique se o Inversor está em modo de emparelhamento.');
+                    addLog('info', 'Verifique se o Bluetooth do CFW900 não está conectado a outro App.');
                 }
             };
 
@@ -131,7 +146,7 @@
                     return;
                 }
 
-                if (!characteristic) return addLog('error', 'Bluetooth não conectado');
+                if (!characteristic) return addLog('error', 'Sem canal de comunicação.');
 
                 const payload = type === 'read' 
                     ? [slaveId, 0x03, (addr >> 8) & 0xFF, addr & 0xFF, 0x00, 0x01]
@@ -141,9 +156,16 @@
                 const buffer = new Uint8Array([...payload, ...crc]);
 
                 try {
-                    await characteristic.writeValue(buffer);
-                    addLog('tx', `Enviado: ${buf2hex(buffer)}`);
-                } catch (e) { addLog('error', 'Erro no envio. Tente reconectar.'); }
+                    // Algumas características exigem writeValueWithoutResponse
+                    if (characteristic.properties.writeWithoutResponse) {
+                        await characteristic.writeValueWithoutResponse(buffer);
+                    } else {
+                        await characteristic.writeValue(buffer);
+                    }
+                    addLog('tx', `TX [${characteristic.uuid.substring(0,4)}]: ${buf2hex(buffer)}`);
+                } catch (e) { 
+                    addLog('error', `Erro de Escrita: ${e.message}`); 
+                }
             };
 
             const updateParam = (idx, field, val) => {
@@ -166,8 +188,8 @@
                         </button>
                     </header>
 
-                    <div className="bg-blue-900/20 border border-blue-500/30 p-3 rounded-lg mb-4 text-[10px] text-blue-300">
-                        💡 <strong>Dica CFW900:</strong> Certifique-se que o Bluetooth do inversor está habilitado nos parâmetros do equipamento (geralmente P0850 ou similar).
+                    <div className="bg-slate-900/50 border border-slate-700 p-3 rounded-lg mb-4 text-[10px] text-slate-400">
+                        🛠 <strong>Nota:</strong> Este código agora tenta descobrir o serviço automaticamente. Observe o log abaixo para ver os UUIDs detectados no CFW900.
                     </div>
 
                     <div className="flex gap-2 mb-4">
@@ -175,7 +197,7 @@
                             onClick={() => !isConnected && setIsDemoMode(!isDemoMode)}
                             className={`text-[10px] px-3 py-1 rounded-full border transition-all ${isDemoMode ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'border-slate-700 text-slate-500'}`}
                         >
-                            {isDemoMode ? '🛠 MODO SIMULAÇÃO ATIVO' : '📡 MODO HARDWARE REAL'}
+                            {isDemoMode ? '🛠 MODO SIMULAÇÃO' : '📡 MODO HARDWARE'}
                         </button>
                     </div>
 
@@ -184,8 +206,8 @@
                             <div key={p.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-inner">
                                 <div className="text-xs font-bold text-slate-500 mb-3 uppercase">{p.name}</div>
                                 <div className="grid grid-cols-2 gap-2 mb-3">
-                                    <input type="number" value={p.address} onChange={e => updateParam(i, 'address', e.target.value)} className="bg-slate-900 border border-slate-700 p-2 rounded text-sm outline-none focus:border-blue-500" placeholder="Endereço"/>
-                                    <input type="number" value={p.value} onChange={e => updateParam(i, 'value', e.target.value)} className="bg-slate-900 border border-slate-700 p-2 rounded text-sm text-blue-400 font-bold outline-none focus:border-blue-500" placeholder="Valor"/>
+                                    <input type="number" value={p.address} onChange={e => updateParam(i, 'address', e.target.value)} className="bg-slate-900 border border-slate-700 p-2 rounded text-sm outline-none focus:border-blue-500 text-white" placeholder="Reg"/>
+                                    <input type="number" value={p.value} onChange={e => updateParam(i, 'value', e.target.value)} className="bg-slate-900 border border-slate-700 p-2 rounded text-sm text-blue-400 font-bold outline-none focus:border-blue-500" placeholder="Val"/>
                                 </div>
                                 <div className="flex gap-2">
                                     <button onClick={() => sendModbus('read', i)} className="flex-1 bg-slate-700 py-2 rounded text-xs font-bold active:bg-slate-600">LER</button>
@@ -196,18 +218,18 @@
                     </div>
 
                     <div className="mt-auto bg-black rounded-xl border border-slate-800 overflow-hidden shadow-2xl">
-                        <div className="bg-slate-800 px-4 py-2 text-[10px] font-bold text-slate-500 border-b border-slate-700 flex justify-between">
-                            <span>TERMINAL LOG</span>
-                            {isConnected && <span className="text-green-500 animate-pulse">ONLINE</span>}
+                        <div className="bg-slate-800 px-4 py-2 text-[10px] font-bold text-slate-500 border-b border-slate-700 flex justify-between uppercase">
+                            <span>Log de Diagnóstico</span>
+                            {isConnected && <span className="text-green-500 animate-pulse">Online</span>}
                         </div>
-                        <div className="h-40 p-3 font-mono text-[10px] overflow-y-auto custom-scrollbar space-y-1 bg-black/50">
+                        <div className="h-48 p-3 font-mono text-[10px] overflow-y-auto custom-scrollbar space-y-1 bg-black/50">
                             {logs.map((log, i) => (
                                 <div key={i} className={
                                     log.type === 'tx' ? 'text-blue-400' : 
                                     log.type === 'success' ? 'text-green-400' : 
-                                    log.type === 'error' ? 'text-red-400' : 'text-slate-500'
+                                    log.type === 'error' ? 'text-red-400 font-bold' : 'text-slate-500'
                                 }>
-                                    <span className="opacity-50">[{log.timestamp}]</span> {log.message}
+                                    <span className="opacity-40">[{log.timestamp}]</span> {log.message}
                                 </div>
                             ))}
                             <div ref={logEndRef} />
