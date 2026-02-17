@@ -71,40 +71,21 @@
                 addLog('info', `RX (PDU): ${hex}`);
 
                 if (data.length === 0) return;
-
                 const functionCode = data[0];
 
-                // 1. Tratamento de Exceções (Erros Modbus)
                 if (functionCode > 0x80) {
-                    const errorCode = data[1];
-                    const errorMsgs = {
-                        1: "Função ilegal",
-                        2: "Endereço ilegal",
-                        3: "Valor ilegal",
-                        4: "Falha no dispositivo"
-                    };
-                    addLog('error', `ERRO Modbus 0x${functionCode.toString(16)}: ${errorMsgs[errorCode] || 'Desconhecido'}`);
+                    addLog('error', `ERRO Modbus: Excepção 0x${data[1].toString(16)}`);
                     return;
                 }
 
-                // 2. Tratamento Função 03 (Leitura)
-                // Resposta padrão PDU: [03] [ByteCount] [DataHigh] [DataLow]...
-                if (functionCode === 0x03) {
-                    if (data.length >= 3) {
-                        const byteCount = data[1];
-                        // Se o byteCount for 2, os dados estão em data[2] e data[3]
-                        const resultVal = (data[2] << 8) | data[3];
-                        addLog('success', `Leitura OK: ${resultVal}`);
-                    }
+                if (functionCode === 0x03 && data.length >= 3) {
+                    const resultVal = (data[2] << 8) | data[3];
+                    addLog('success', `Valor lido: ${resultVal}`);
                 }
 
-                // 3. Tratamento Função 06 (Escrita)
-                // Resposta padrão PDU: [06] [AddrHigh] [AddrLow] [DataHigh] [DataLow]
-                if (functionCode === 0x06) {
-                    if (data.length >= 5) {
-                        const writtenVal = (data[3] << 8) | data[4];
-                        addLog('success', `Escrita Confirmada: ${writtenVal}`);
-                    }
+                if (functionCode === 0x06 && data.length >= 5) {
+                    const writtenVal = (data[3] << 8) | data[4];
+                    addLog('success', `Escrita Confirmada: ${writtenVal}`);
                 }
             };
 
@@ -116,15 +97,10 @@
                 }
 
                 try {
-                    addLog('info', 'Buscando CFW900...');
+                    addLog('info', 'Buscando dispositivo...');
                     const device = await navigator.bluetooth.requestDevice({
                         filters: [{ namePrefix: 'CFW' }, { namePrefix: 'WEG' }],
                         optionalServices: serviceUUIDs
-                    }).catch(async () => {
-                        return await navigator.bluetooth.requestDevice({
-                            acceptAllDevices: true,
-                            optionalServices: serviceUUIDs
-                        });
                     });
 
                     const server = await device.gatt.connect();
@@ -154,12 +130,12 @@
                     
                     setCharacteristic(foundChar);
                     setIsConnected(true);
-                    addLog('success', `Conectado!`);
+                    addLog('success', `Conectado! Se solicitado, o PIN é 123456`);
                     
                     device.addEventListener('gattserverdisconnected', () => {
                         setIsConnected(false);
                         setCharacteristic(null);
-                        addLog('error', 'Desconectado.');
+                        addLog('error', 'Disconectado.');
                     });
 
                 } catch (err) {
@@ -179,7 +155,6 @@
                 const addr = parseInt(p.address);
                 const val = parseInt(p.value);
 
-                // Payload PDU: [Função] [Addr High] [Addr Low] [Data High] [Data Low]
                 const payload = type === 'read' 
                     ? [0x03, (addr >> 8) & 0xFF, addr & 0xFF, 0x00, 0x01] 
                     : [0x06, (addr >> 8) & 0xFF, addr & 0xFF, (val >> 8) & 0xFF, val & 0xFF];
@@ -192,7 +167,11 @@
                         ? characteristic.writeValueWithoutResponse(buffer) 
                         : characteristic.writeValue(buffer));
                 } catch (e) { 
-                    addLog('error', `Erro: ${e.message}`); 
+                    if (e.name === 'NotAllowedError') {
+                        addLog('error', 'Erro de Autenticação. Verifique o PIN 123456 nas definições Bluetooth do sistema.');
+                    } else {
+                        addLog('error', `Erro: ${e.message}`);
+                    }
                 }
             };
 
@@ -206,46 +185,56 @@
                 <div className="max-w-md mx-auto min-h-screen flex flex-col p-4 text-slate-200">
                     <header className="flex justify-between items-center mb-6 bg-slate-800 p-4 rounded-xl shadow-lg border border-slate-700">
                         <div className="flex flex-col">
-                            <h1 className="text-xl font-bold text-blue-400">Inversor Pro</h1>
-                            <span className="text-[9px] text-slate-500 font-mono tracking-widest uppercase text-center">Pure PDU / Fixed Format</span>
+                            <h1 className="text-xl font-bold text-blue-400 tracking-tight">Inversor Pro</h1>
+                            <span className="text-[9px] text-slate-500 font-mono uppercase">Modbus PDU over BLE</span>
                         </div>
                         <button 
                             onClick={connectBluetooth}
-                            className={`px-4 py-2 rounded-lg font-bold transition-all shadow-md active:scale-95 ${isConnected ? 'bg-green-600/20 text-green-400 border border-green-500/50' : 'bg-blue-600 text-white'}`}
+                            className={`px-4 py-2 rounded-lg font-bold transition-all active:scale-95 ${isConnected ? 'bg-green-600/20 text-green-400 border border-green-500/50' : 'bg-blue-600 text-white'}`}
                         >
-                            {isConnected ? 'ON' : 'OFF'}
+                            {isConnected ? 'ON' : 'CONECTAR'}
                         </button>
                     </header>
+
+                    <div className="bg-blue-500/10 border border-blue-500/30 p-3 rounded-lg mb-4 flex items-center gap-3">
+                        <div className="bg-blue-500 p-2 rounded-full shadow-lg shadow-blue-500/20">
+                            <i data-lucide="shield-check" className="w-4 h-4 text-white"></i>
+                        </div>
+                        <div>
+                            <p className="text-[10px] text-blue-300 font-bold uppercase leading-none mb-1">Segurança Bluetooth</p>
+                            <p className="text-[11px] text-blue-100/70">PIN padrão: <span className="text-white font-mono font-bold tracking-widest">123456</span></p>
+                        </div>
+                    </div>
 
                     <div className="flex gap-2 mb-4">
                         <button 
                             onClick={() => !isConnected && setIsDemoMode(!isDemoMode)}
                             className={`text-[10px] px-3 py-1 rounded-full border transition-all ${isDemoMode ? 'bg-amber-500/10 border-amber-500 text-amber-500 font-bold' : 'border-slate-700 text-slate-500'}`}
                         >
-                            {isDemoMode ? '🛠 MODO SIMULAÇÃO' : '📡 MODO HARDWARE'}
+                            {isDemoMode ? '🛠 MODO SIMULAÇÃO' : '📡 MODO REAL'}
                         </button>
                     </div>
 
                     <div className="space-y-4 mb-6 flex-1 overflow-y-auto custom-scrollbar pr-1">
                         {params.map((p, i) => (
-                            <div key={p.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-lg">
-                                <div className="text-xs font-bold text-slate-400 mb-3 uppercase flex justify-between">
+                            <div key={p.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-lg transition-all hover:border-slate-600">
+                                <div className="text-xs font-bold text-slate-400 mb-3 uppercase flex justify-between items-center">
                                     <span>{p.name}</span>
-                                    <span className="text-blue-500/20 text-[9px]">ADDR: 0x{parseInt(p.address).toString(16).toUpperCase().padStart(4, '0')}</span>
+                                    <span className="bg-slate-900 px-2 py-0.5 rounded text-[8px] text-blue-500">ADDR: 0x{parseInt(p.address).toString(16).toUpperCase().padStart(4, '0')}</span>
                                 </div>
                                 <div className="grid grid-cols-2 gap-3 mb-4">
                                     <div className="space-y-1">
-                                        <label className="text-[9px] text-slate-600 ml-1">REGISTO (DEC)</label>
-                                        <input type="number" value={p.address} onChange={e => updateParam(i, 'address', e.target.value)} className="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white outline-none focus:border-blue-500" />
+                                        <label className="text-[9px] text-slate-600 ml-1 font-bold">REGISTO (DEC)</label>
+                                        <input type="number" value={p.address} onChange={e => updateParam(i, 'address', e.target.value)} className="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white focus:border-blue-500 outline-none" />
                                     </div>
                                     <div className="space-y-1">
-                                        <label className="text-[9px] text-slate-600 ml-1">VALOR</label>
-                                        <input type="number" value={p.value} onChange={e => updateParam(i, 'value', e.target.value)} className="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-blue-400 font-bold outline-none focus:border-blue-500" />
+                                        <label className="text-[9px] text-slate-600 ml-1 font-bold">VALOR PARA ENVIAR</label>
+                                        <input type="number" value={p.value} onChange={e => updateParam(i, 'value', e.target.value)} className="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-blue-400 font-bold focus:border-blue-500 outline-none" />
                                     </div>
                                 </div>
                                 <div className="flex gap-2">
-                                    <button onClick={() => sendModbus('read', i)} className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded text-xs font-bold transition-all active:scale-95 uppercase">Ler</button>
-                                    <button onClick={() => sendModbus('write', i)} className="flex-1 bg-blue-600 hover:bg-blue-500 py-2 rounded text-xs font-bold text-white uppercase tracking-tighter transition-all active:scale-95">Gravar</button>
+                                    <button onClick={() => sendModbus('read', i)} className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded text-xs font-bold transition-all active:scale-95">LER</button>
+                                    <button onClick={() => sendModbus('write', i)} className="flex-1 bg-blue-600 hover:bg-blue-500 py-2 rounded text-xs font-bold text-white uppercase transition-all active:scale-95">GRAVAR</button>
                                 </div>
                             </div>
                         ))}
@@ -253,18 +242,18 @@
 
                     <div className="bg-[#0a0f1d] rounded-xl border border-slate-800 overflow-hidden shadow-2xl shrink-0">
                         <div className="bg-slate-800/80 px-4 py-2 text-[10px] font-bold text-slate-400 border-b border-slate-700 flex justify-between items-center">
-                            <span>TERMINAL PDU (H-L ORDER)</span>
-                            <button onClick={() => setLogs([])} className="text-[9px] hover:text-white uppercase">Limpar</button>
+                            <span className="flex items-center gap-2 uppercase tracking-widest"><i data-lucide="terminal" className="w-3 h-3"></i> Monitor de Dados</span>
+                            <button onClick={() => setLogs([])} className="text-[9px] text-slate-500 hover:text-white uppercase transition-colors">Limpar</button>
                         </div>
-                        <div className="h-44 p-3 font-mono text-[10px] overflow-y-auto custom-scrollbar space-y-1">
+                        <div className="h-40 p-3 font-mono text-[10px] overflow-y-auto custom-scrollbar space-y-1 bg-black/40">
                             {logs.map((log, i) => (
                                 <div key={i} className={
-                                    log.type === 'tx' ? 'text-blue-400 font-bold' : 
-                                    log.type === 'success' ? 'text-green-400' : 
-                                    log.type === 'error' ? 'text-red-400 font-bold' : 
-                                    log.type === 'info' ? 'text-slate-400' : 'text-slate-600'
+                                    log.type === 'tx' ? 'text-blue-400 font-bold border-l-2 border-blue-500 pl-2' : 
+                                    log.type === 'success' ? 'text-green-400 border-l-2 border-green-500 pl-2' : 
+                                    log.type === 'error' ? 'text-red-400 font-bold border-l-2 border-red-500 pl-2 bg-red-500/5' : 
+                                    'text-slate-500 pl-2'
                                 }>
-                                    <span className="opacity-30">[{log.timestamp}]</span> {log.message}
+                                    <span className="opacity-30 text-[8px]">[{log.timestamp}]</span> {log.message}
                                 </div>
                             ))}
                             <div ref={logEndRef} />
