@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Inversor Pro - Controlo Bluetooth (Little Endian)</title>
+    <title>Inversor Pro - Modbus PDU over BLE</title>
     <!-- Dependências via CDN -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -24,18 +24,6 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
-        const calculateCRC = (buffer) => {
-            let crc = 0xFFFF;
-            for (let pos = 0; pos < buffer.length; pos++) {
-                crc ^= buffer[pos];
-                for (let i = 8; i !== 0; i--) {
-                    if ((crc & 0x0001) !== 0) crc = (crc >> 1) ^ 0xA001;
-                    else crc >>= 1;
-                }
-            }
-            return [(crc & 0xFF), ((crc >> 8) & 0xFF)];
-        };
-
         const buf2hex = (buffer) => {
             return [...new Uint8Array(buffer)].map(x => x.toString(16).padStart(2, '0')).join(' ').toUpperCase();
         };
@@ -45,9 +33,6 @@
             const [characteristic, setCharacteristic] = useState(null);
             const [isDemoMode, setIsDemoMode] = useState(false);
             const [logs, setLogs] = useState([]);
-            const [slaveId, setSlaveId] = useState(1);
-            const [timeout, setTimeoutVal] = useState(1000);
-            const [showAdvanced, setShowAdvanced] = useState(false);
             
             const [params, setParams] = useState([
                 { id: 1, name: 'Frequência Alvo', address: 100, value: 0 },
@@ -81,16 +66,14 @@
             const handleData = (event) => {
                 const value = event.target.value;
                 const hex = buf2hex(value.buffer);
-                addLog('info', `RX: ${hex}`);
+                addLog('info', `RX (PDU): ${hex}`);
                 
                 const data = new Uint8Array(value.buffer);
-                // Verifica resposta de leitura (Função 03)
-                if (data.length >= 5 && data[1] === 0x03) {
-                    if (data[0] === parseInt(slaveId)) {
-                        // Modificado para Little Endian: Byte L (data[3]) | Byte H (data[4] << 8)
-                        const resultVal = data[3] | (data[4] << 8);
-                        addLog('success', `Valor lido (Little Endian): ${resultVal}`);
-                    }
+                // Resposta PDU de leitura: [Função][Bytes][Data...]
+                if (data.length >= 3 && data[0] === 0x03) {
+                    // Little Endian: Byte 2 (L) | Byte 3 (H)
+                    const resultVal = data[2] | (data[3] << 8);
+                    addLog('success', `Valor lido: ${resultVal}`);
                 }
             };
 
@@ -155,7 +138,7 @@
 
             const sendModbus = async (type, idx) => {
                 if (isDemoMode) {
-                    addLog('tx', `Simulado: ${type}`);
+                    addLog('tx', `Simulado (PDU): ${type}`);
                     return;
                 }
 
@@ -164,18 +147,17 @@
                 const p = params[idx];
                 const addr = parseInt(p.address);
                 const val = parseInt(p.value);
-                const sId = parseInt(slaveId);
 
-                // Little Endian nos endereços e valores: [Low Byte, High Byte]
+                // Payload PDU apenas (Sem SlaveID, Sem CRC)
+                // Formato Little Endian aplicado no endereço e valor
                 const payload = type === 'read' 
-                    ? [sId, 0x03, addr & 0xFF, (addr >> 8) & 0xFF, 0x01, 0x00] // Pedindo 1 registo
-                    : [sId, 0x06, addr & 0xFF, (addr >> 8) & 0xFF, val & 0xFF, (val >> 8) & 0xFF];
+                    ? [0x03, addr & 0xFF, (addr >> 8) & 0xFF, 0x01, 0x00] 
+                    : [0x06, addr & 0xFF, (addr >> 8) & 0xFF, val & 0xFF, (val >> 8) & 0xFF];
                 
-                const crc = calculateCRC(payload);
-                const buffer = new Uint8Array([...payload, ...crc]);
+                const buffer = new Uint8Array(payload);
 
                 try {
-                    addLog('info', `TX (LE): ${buf2hex(buffer)}`);
+                    addLog('info', `TX (PDU LE): ${buf2hex(buffer)}`);
                     await (characteristic.properties.writeWithoutResponse 
                         ? characteristic.writeValueWithoutResponse(buffer) 
                         : characteristic.writeValue(buffer));
@@ -195,7 +177,7 @@
                     <header className="flex justify-between items-center mb-6 bg-slate-800 p-4 rounded-xl shadow-lg border border-slate-700">
                         <div className="flex flex-col">
                             <h1 className="text-xl font-bold text-blue-400">Inversor Pro</h1>
-                            <span className="text-[9px] text-slate-500 font-mono tracking-widest uppercase">Modbus Little Endian</span>
+                            <span className="text-[9px] text-slate-500 font-mono tracking-widest uppercase text-center">Pure PDU / Little Endian</span>
                         </div>
                         <button 
                             onClick={connectBluetooth}
@@ -204,50 +186,6 @@
                             {isConnected ? 'ON' : 'OFF'}
                         </button>
                     </header>
-
-                    {/* Painel de Configurações */}
-                    <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-xl mb-4 shadow-inner">
-                        <div className="flex items-center justify-between mb-2">
-                            <span className="text-[10px] font-bold text-slate-500 uppercase">Configurações Base</span>
-                            <button 
-                                onClick={() => setShowAdvanced(!showAdvanced)}
-                                className="text-[9px] text-blue-500 hover:underline uppercase"
-                            >
-                                {showAdvanced ? 'Esconder' : 'Avançado'}
-                            </button>
-                        </div>
-                        
-                        <div className="grid grid-cols-2 gap-4">
-                            <div className="flex flex-col">
-                                <label className="text-[9px] text-slate-400 mb-1">SLAVE ID</label>
-                                <input 
-                                    type="number" 
-                                    value={slaveId} 
-                                    onChange={(e) => setSlaveId(e.target.value)}
-                                    className="bg-slate-900 border border-slate-700 p-2 rounded text-center font-bold text-white focus:border-blue-500 outline-none"
-                                />
-                            </div>
-                            <div className="flex flex-col">
-                                <label className="text-[9px] text-slate-400 mb-1">TIMEOUT (ms)</label>
-                                <input 
-                                    type="number" 
-                                    value={timeout} 
-                                    onChange={(e) => setTimeoutVal(e.target.value)}
-                                    className="bg-slate-900 border border-slate-700 p-2 rounded text-center font-bold text-white focus:border-blue-500 outline-none"
-                                />
-                            </div>
-                        </div>
-
-                        {showAdvanced && (
-                            <div className="mt-4 pt-4 border-t border-slate-700/50 grid grid-cols-2 gap-2 text-[8px] text-slate-500 font-mono">
-                                <div className="bg-slate-900/50 p-2 rounded border border-slate-800">DATA ORDER: LITTLE ENDIAN</div>
-                                <div className="bg-slate-900/50 p-2 rounded border border-slate-800">DATA BITS: 8</div>
-                                <div className="bg-slate-900/50 p-2 rounded border border-slate-800">STOP BITS: 1</div>
-                                <div className="bg-slate-900/50 p-2 rounded border border-slate-800">PARITY: NONE</div>
-                                <div className="col-span-2 mt-1 text-center italic">Ordem de bytes invertida (LSB primeiro)</div>
-                            </div>
-                        )}
-                    </div>
 
                     <div className="flex gap-2 mb-4">
                         <button 
@@ -263,21 +201,21 @@
                             <div key={p.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700 shadow-lg">
                                 <div className="text-xs font-bold text-slate-400 mb-3 uppercase flex justify-between">
                                     <span>{p.name}</span>
-                                    <span className="text-blue-500/20 text-[9px]">HEX: {parseInt(p.address).toString(16).toUpperCase()} (LE)</span>
+                                    <span className="text-blue-500/20 text-[9px]">PDU ADDR: 0x{parseInt(p.address).toString(16).toUpperCase()}</span>
                                 </div>
                                 <div className="grid grid-cols-2 gap-3 mb-4">
                                     <div className="space-y-1">
                                         <label className="text-[9px] text-slate-600 ml-1">REGISTO (DEC)</label>
-                                        <input type="number" value={p.address} onChange={e => updateParam(i, 'address', e.target.value)} className="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white" />
+                                        <input type="number" value={p.address} onChange={e => updateParam(i, 'address', e.target.value)} className="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white outline-none focus:border-blue-500" />
                                     </div>
                                     <div className="space-y-1">
                                         <label className="text-[9px] text-slate-600 ml-1">VALOR</label>
-                                        <input type="number" value={p.value} onChange={e => updateParam(i, 'value', e.target.value)} className="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-blue-400 font-bold" />
+                                        <input type="number" value={p.value} onChange={e => updateParam(i, 'value', e.target.value)} className="w-full bg-slate-900 border border-slate-700 p-2 rounded text-sm text-blue-400 font-bold outline-none focus:border-blue-500" />
                                     </div>
                                 </div>
                                 <div className="flex gap-2">
-                                    <button onClick={() => sendModbus('read', i)} className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded text-xs font-bold">LER</button>
-                                    <button onClick={() => sendModbus('write', i)} className="flex-1 bg-blue-600 hover:bg-blue-500 py-2 rounded text-xs font-bold text-white uppercase tracking-tighter">Gravar Registro</button>
+                                    <button onClick={() => sendModbus('read', i)} className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded text-xs font-bold transition-all active:scale-95 uppercase">Ler</button>
+                                    <button onClick={() => sendModbus('write', i)} className="flex-1 bg-blue-600 hover:bg-blue-500 py-2 rounded text-xs font-bold text-white uppercase tracking-tighter transition-all active:scale-95">Gravar</button>
                                 </div>
                             </div>
                         ))}
@@ -285,10 +223,10 @@
 
                     <div className="bg-[#0a0f1d] rounded-xl border border-slate-800 overflow-hidden shadow-2xl shrink-0">
                         <div className="bg-slate-800/80 px-4 py-2 text-[10px] font-bold text-slate-400 border-b border-slate-700 flex justify-between items-center">
-                            <span>MONITOR SERIAL (LITTLE ENDIAN)</span>
+                            <span>TERMINAL PDU (MODBUS RAW)</span>
                             <button onClick={() => setLogs([])} className="text-[9px] hover:text-white uppercase">Limpar</button>
                         </div>
-                        <div className="h-40 p-3 font-mono text-[10px] overflow-y-auto custom-scrollbar space-y-1">
+                        <div className="h-44 p-3 font-mono text-[10px] overflow-y-auto custom-scrollbar space-y-1">
                             {logs.map((log, i) => (
                                 <div key={i} className={
                                     log.type === 'tx' ? 'text-blue-400 font-bold' : 
