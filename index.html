@@ -73,19 +73,32 @@
                 if (data.length === 0) return;
                 const functionCode = data[0];
 
+                // Tratamento de Erro/Excepção Modbus
                 if (functionCode > 0x80) {
-                    addLog('error', `ERRO Modbus: Excepção 0x${data[1].toString(16)}`);
+                    const exceptionCode = data.length > 1 ? data[1] : '??';
+                    addLog('error', `Modbus Exception 0x${exceptionCode.toString(16).toUpperCase()}`);
                     return;
                 }
 
-                if (functionCode === 0x03 && data.length >= 3) {
-                    const resultVal = (data[2] << 8) | data[3];
-                    addLog('success', `Valor lido: ${resultVal}`);
+                // Função 03: [03] [ByteCount] [DataHi] [DataLo]...
+                if (functionCode === 0x03) {
+                    if (data.length >= 4) {
+                        const byteCount = data[1];
+                        // Lemos os dois primeiros bytes de dados após o byte de contagem
+                        const resultVal = (data[2] << 8) | data[3];
+                        addLog('success', `Lido: ${resultVal} (bytes: ${byteCount})`);
+                    } else {
+                        addLog('error', 'Resposta de leitura incompleta');
+                    }
                 }
 
-                if (functionCode === 0x06 && data.length >= 5) {
-                    const writtenVal = (data[3] << 8) | data[4];
-                    addLog('success', `Escrita Confirmada: ${writtenVal}`);
+                // Função 06: [06] [AddrHi] [AddrLo] [DataHi] [DataLo]
+                if (functionCode === 0x06) {
+                    if (data.length >= 5) {
+                        const addr = (data[1] << 8) | data[2];
+                        const val = (data[3] << 8) | data[4];
+                        addLog('success', `Escrita OK no Reg ${addr}: ${val}`);
+                    }
                 }
             };
 
@@ -103,8 +116,11 @@
                         optionalServices: serviceUUIDs
                     });
 
+                    addLog('info', 'Conectando ao GATT...');
                     const server = await device.gatt.connect();
-                    await new Promise(r => setTimeout(r, 600));
+                    
+                    // Pequeno delay para estabilização
+                    await new Promise(r => setTimeout(r, 800));
 
                     const services = await server.getPrimaryServices();
                     let foundChar = null;
@@ -113,29 +129,30 @@
                         try {
                             const characteristics = await service.getCharacteristics();
                             for (const char of characteristics) {
+                                // Procuramos uma característica que suporte escrita e notificações
                                 if (char.properties.write || char.properties.writeWithoutResponse) {
                                     if (char.properties.notify || char.properties.indicate) {
                                         await char.startNotifications();
                                         char.addEventListener('characteristicvaluechanged', handleData);
+                                        foundChar = char;
+                                        break;
                                     }
-                                    foundChar = char;
-                                    break;
                                 }
                             }
                         } catch (e) { continue; }
                         if (foundChar) break;
                     }
 
-                    if (!foundChar) throw new Error("Canal de dados não encontrado.");
+                    if (!foundChar) throw new Error("Não foi encontrada uma característica Modbus válida.");
                     
                     setCharacteristic(foundChar);
                     setIsConnected(true);
-                    addLog('success', `Conectado! Se solicitado, o PIN é 123456`);
+                    addLog('success', `Conectado! PIN: 123456`);
                     
                     device.addEventListener('gattserverdisconnected', () => {
                         setIsConnected(false);
                         setCharacteristic(null);
-                        addLog('error', 'Disconectado.');
+                        addLog('error', 'Dispositivo desconectado.');
                     });
 
                 } catch (err) {
@@ -149,12 +166,13 @@
                     return;
                 }
 
-                if (!characteristic) return addLog('error', 'Sem conexão.');
+                if (!characteristic) return addLog('error', 'Sem conexão ativa.');
 
                 const p = params[idx];
                 const addr = parseInt(p.address);
                 const val = parseInt(p.value);
 
+                // Formato PDU: [Função] [EndHi] [EndLo] [ValHi] [ValLo]
                 const payload = type === 'read' 
                     ? [0x03, (addr >> 8) & 0xFF, addr & 0xFF, 0x00, 0x01] 
                     : [0x06, (addr >> 8) & 0xFF, addr & 0xFF, (val >> 8) & 0xFF, val & 0xFF];
@@ -163,14 +181,18 @@
 
                 try {
                     addLog('info', `TX (PDU): ${buf2hex(buffer)}`);
-                    await (characteristic.properties.writeWithoutResponse 
-                        ? characteristic.writeValueWithoutResponse(buffer) 
-                        : characteristic.writeValue(buffer));
-                } catch (e) { 
-                    if (e.name === 'NotAllowedError') {
-                        addLog('error', 'Erro de Autenticação. Verifique o PIN 123456 nas definições Bluetooth do sistema.');
+                    
+                    // Tentativa de escrita robusta
+                    if (characteristic.properties.writeWithoutResponse) {
+                        await characteristic.writeValueWithoutResponse(buffer);
                     } else {
-                        addLog('error', `Erro: ${e.message}`);
+                        await characteristic.writeValue(buffer);
+                    }
+                } catch (e) { 
+                    if (e.name === 'NotAllowedError' || e.message.includes('GATT')) {
+                        addLog('error', 'Erro de permissão/PIN. Tente emparelhar nas definições do sistema.');
+                    } else {
+                        addLog('error', `Erro TX: ${e.message}`);
                     }
                 }
             };
