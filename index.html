@@ -66,14 +66,45 @@
             const handleData = (event) => {
                 const value = event.target.value;
                 const hex = buf2hex(value.buffer);
-                addLog('info', `RX (PDU): ${hex}`);
-                
                 const data = new Uint8Array(value.buffer);
-                // Ajuste na recepção para ler o valor conforme a nova ordem solicitada
-                if (data.length >= 3 && data[0] === 0x03) {
-                    // Lendo como Big Endian conforme o padrão solicitado no TX
-                    const resultVal = (data[2] << 8) | data[3];
-                    addLog('success', `Valor lido: ${resultVal}`);
+                
+                addLog('info', `RX (PDU): ${hex}`);
+
+                if (data.length === 0) return;
+
+                const functionCode = data[0];
+
+                // 1. Tratamento de Exceções (Erros Modbus)
+                if (functionCode > 0x80) {
+                    const errorCode = data[1];
+                    const errorMsgs = {
+                        1: "Função ilegal",
+                        2: "Endereço ilegal",
+                        3: "Valor ilegal",
+                        4: "Falha no dispositivo"
+                    };
+                    addLog('error', `ERRO Modbus 0x${functionCode.toString(16)}: ${errorMsgs[errorCode] || 'Desconhecido'}`);
+                    return;
+                }
+
+                // 2. Tratamento Função 03 (Leitura)
+                // Resposta padrão PDU: [03] [ByteCount] [DataHigh] [DataLow]...
+                if (functionCode === 0x03) {
+                    if (data.length >= 3) {
+                        const byteCount = data[1];
+                        // Se o byteCount for 2, os dados estão em data[2] e data[3]
+                        const resultVal = (data[2] << 8) | data[3];
+                        addLog('success', `Leitura OK: ${resultVal}`);
+                    }
+                }
+
+                // 3. Tratamento Função 06 (Escrita)
+                // Resposta padrão PDU: [06] [AddrHigh] [AddrLow] [DataHigh] [DataLow]
+                if (functionCode === 0x06) {
+                    if (data.length >= 5) {
+                        const writtenVal = (data[3] << 8) | data[4];
+                        addLog('success', `Escrita Confirmada: ${writtenVal}`);
+                    }
                 }
             };
 
@@ -148,8 +179,7 @@
                 const addr = parseInt(p.address);
                 const val = parseInt(p.value);
 
-                // Payload PDU conforme solicitado: [Função] [Addr High] [Addr Low] [Data High] [Data Low]
-                // Exemplo solicitado: 06 00 64 00 0A (para addr 100 e val 10)
+                // Payload PDU: [Função] [Addr High] [Addr Low] [Data High] [Data Low]
                 const payload = type === 'read' 
                     ? [0x03, (addr >> 8) & 0xFF, addr & 0xFF, 0x00, 0x01] 
                     : [0x06, (addr >> 8) & 0xFF, addr & 0xFF, (val >> 8) & 0xFF, val & 0xFF];
@@ -223,7 +253,7 @@
 
                     <div className="bg-[#0a0f1d] rounded-xl border border-slate-800 overflow-hidden shadow-2xl shrink-0">
                         <div className="bg-slate-800/80 px-4 py-2 text-[10px] font-bold text-slate-400 border-b border-slate-700 flex justify-between items-center">
-                            <span>TERMINAL PDU (ORDER: H-L)</span>
+                            <span>TERMINAL PDU (H-L ORDER)</span>
                             <button onClick={() => setLogs([])} className="text-[9px] hover:text-white uppercase">Limpar</button>
                         </div>
                         <div className="h-44 p-3 font-mono text-[10px] overflow-y-auto custom-scrollbar space-y-1">
