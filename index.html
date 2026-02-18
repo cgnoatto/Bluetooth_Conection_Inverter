@@ -48,7 +48,9 @@
                 "49535343-fe7d-4ae5-8fa9-9fafd205e455", // Microchip/WEG
                 "0000fff0-0000-1000-8000-00805f9b34fb", // Telink
                 "6e400001-b5a3-f393-e0a9-e50e24dcca9e", // Nordic UART
-                "0000af00-0000-1000-8000-00805f9b34fb"  // Outros
+                "0000af00-0000-1000-8000-00805f9b34fb", // Automate
+                "00001800-0000-1000-8000-00805f9b34fb", // Generic Access
+                "00001801-0000-1000-8000-00805f9b34fb"  // Generic Attribute
             ];
 
             useEffect(() => {
@@ -97,13 +99,15 @@
                 try {
                     addLog('info', 'A procurar inversor...');
                     
-                    // CORREÇÃO: Adicionar os UUIDs ao requestDevice para garantir permissão de acesso
+                    // Estratégia de busca mista: Nome + Serviços Opcionais
                     const device = await navigator.bluetooth.requestDevice({
                         filters: [
                             { namePrefix: 'CFW' }, 
                             { namePrefix: 'WEG' },
                             { namePrefix: 'BT' },
-                            { namePrefix: 'Inverter' }
+                            { namePrefix: 'Inverter' },
+                            { namePrefix: 'HC-08' },
+                            { namePrefix: 'BT05' }
                         ],
                         optionalServices: serviceUUIDs
                     });
@@ -111,51 +115,60 @@
                     addLog('info', `A ligar a ${device.name}...`);
                     const server = await device.gatt.connect();
                     
-                    // Aguardar inicialização do serviço (alguns dispositivos precisam de mais tempo)
-                    addLog('info', 'A descobrir serviços...');
-                    await new Promise(r => setTimeout(r, 1500));
+                    // Delay para estabilizar a conexão GATT antes do discovery
+                    addLog('info', 'Ligado. A obter serviços...');
+                    await new Promise(r => setTimeout(r, 2000));
 
                     const services = await server.getPrimaryServices();
                     
-                    if (services.length === 0) {
-                        throw new Error("Nenhum serviço encontrado no dispositivo. Verifique se o BLE está ativo.");
+                    if (!services || services.length === 0) {
+                        throw new Error("Serviços não expostos. Tente emparelhar o dispositivo nas definições do sistema primeiro.");
                     }
 
                     let foundChar = null;
 
                     for (const service of services) {
                         addLog('info', `A analisar serviço: ...${service.uuid.slice(-6).toUpperCase()}`);
-                        const chars = await service.getCharacteristics();
-                        
-                        for (const char of chars) {
-                            const props = char.properties;
-                            if ((props.write || props.writeWithoutResponse) && (props.notify || props.indicate)) {
-                                foundChar = char;
-                                break;
+                        try {
+                            const chars = await service.getCharacteristics();
+                            for (const char of chars) {
+                                const props = char.properties;
+                                // Procuramos a característica de comunicação (Read+Write ou Notify+Write)
+                                if ((props.write || props.writeWithoutResponse) && (props.notify || props.indicate || props.read)) {
+                                    foundChar = char;
+                                    break;
+                                }
                             }
+                        } catch (e) {
+                            console.warn(`Erro ao ler características do serviço ${service.uuid}`);
                         }
                         if (foundChar) break;
                     }
 
-                    if (!foundChar) throw new Error("Não foi encontrada a porta de dados Modbus compatível.");
+                    if (!foundChar) throw new Error("Porta de dados Modbus não encontrada nos serviços disponíveis.");
 
                     addLog('info', `Porta encontrada: ...${foundChar.uuid.slice(-6).toUpperCase()}`);
                     
-                    await foundChar.startNotifications();
-                    foundChar.addEventListener('characteristicvaluechanged', handleData);
+                    // Tentar ativar notificações se suportado
+                    if (foundChar.properties.notify || foundChar.properties.indicate) {
+                        await foundChar.startNotifications();
+                        foundChar.addEventListener('characteristicvaluechanged', handleData);
+                    } else if (foundChar.properties.read) {
+                        addLog('info', 'Aviso: Esta porta não suporta notificações em tempo real.');
+                    }
                     
                     setCharacteristic(foundChar);
                     setIsConnected(true);
-                    addLog('success', 'Comunicação Estabelecida!');
+                    addLog('success', 'Comunicação Pronta!');
                     
                     device.addEventListener('gattserverdisconnected', () => {
                         setIsConnected(false);
                         setCharacteristic(null);
-                        addLog('error', 'Ligação perdida.');
+                        addLog('error', 'Dispositivo desconectado.');
                     });
 
                 } catch (err) {
-                    addLog('error', `Erro: ${err.message}`);
+                    addLog('error', `${err.message}`);
                     console.error(err);
                 }
             };
@@ -186,6 +199,16 @@
                     } else {
                         await characteristic.writeValueWithoutResponse(buffer);
                     }
+
+                    // Se for leitura e não tivermos notificações, fazemos um polling manual
+                    if (type === 'read' && !characteristic.properties.notify) {
+                        setTimeout(async () => {
+                            try {
+                                const val = await characteristic.readValue();
+                                handleData({ target: { value: val } });
+                            } catch (e) {}
+                        }, 300);
+                    }
                     
                 } catch (e) { 
                     addLog('error', `Falha no envio: ${e.message}`);
@@ -203,7 +226,7 @@
                     <header className="flex justify-between items-center mb-6 bg-slate-800 p-4 rounded-xl shadow-lg border border-slate-700">
                         <div className="flex flex-col">
                             <h1 className="text-xl font-bold text-blue-400">Inversor Pro</h1>
-                            <span className="text-[9px] text-slate-500 font-mono">MODBUS PDU OVER BLE</span>
+                            <span className="text-[9px] text-slate-500 font-mono tracking-wider">MODBUS PDU OVER BLE</span>
                         </div>
                         <button 
                             onClick={connectBluetooth}
@@ -216,8 +239,8 @@
                     <div className="bg-blue-500/10 border border-blue-500/30 p-3 rounded-lg mb-4 flex items-center gap-3">
                         <i data-lucide="shield-check" className="w-5 h-5 text-blue-400"></i>
                         <div>
-                            <p className="text-[10px] text-blue-300 font-bold uppercase leading-none mb-1">PIN Bluetooth</p>
-                            <p className="text-sm font-mono font-bold tracking-[0.2em]">123456</p>
+                            <p className="text-[10px] text-blue-300 font-bold uppercase leading-none mb-1">Dica de Ligação</p>
+                            <p className="text-[11px] text-blue-100/70 leading-tight">Certifique-se de que o inversor está emparelhado no Android antes de clicar em Conectar.</p>
                         </div>
                     </div>
 
@@ -232,14 +255,20 @@
 
                     <div className="space-y-4 mb-6 flex-1 overflow-y-auto custom-scrollbar pr-1">
                         {params.map((p, i) => (
-                            <div key={p.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                            <div key={p.id} className="bg-slate-800 p-4 rounded-xl border border-slate-700 transition-colors hover:border-slate-600">
                                 <div className="text-xs font-bold text-slate-400 mb-3 uppercase flex justify-between">
                                     <span>{p.name}</span>
-                                    <span className="text-blue-500">P{p.address}</span>
+                                    <span className="text-blue-500 font-mono">ADR:{p.address}</span>
                                 </div>
                                 <div className="grid grid-cols-2 gap-3 mb-4">
-                                    <input type="number" value={p.address} onChange={e => updateParam(i, 'address', e.target.value)} placeholder="Registo" className="bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white outline-none focus:border-blue-500" />
-                                    <input type="number" value={p.value} onChange={e => updateParam(i, 'value', e.target.value)} placeholder="Valor" className="bg-slate-900 border border-slate-700 p-2 rounded text-sm text-blue-400 font-bold outline-none focus:border-blue-500" />
+                                    <div className="flex flex-col gap-1">
+                                        <label className="text-[8px] text-slate-500 uppercase ml-1">Registo</label>
+                                        <input type="number" value={p.address} onChange={e => updateParam(i, 'address', e.target.value)} className="bg-slate-900 border border-slate-700 p-2 rounded text-sm text-white outline-none focus:border-blue-500" />
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                        <label className="text-[8px] text-slate-500 uppercase ml-1">Valor</label>
+                                        <input type="number" value={p.value} onChange={e => updateParam(i, 'value', e.target.value)} className="bg-slate-900 border border-slate-700 p-2 rounded text-sm text-blue-400 font-bold outline-none focus:border-blue-500" />
+                                    </div>
                                 </div>
                                 <div className="flex gap-2">
                                     <button onClick={() => sendModbus('read', i)} className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded text-xs font-bold transition-all">LER</button>
@@ -251,15 +280,15 @@
 
                     <div className="bg-[#0a0f1d] rounded-xl border border-slate-800 overflow-hidden shadow-2xl shrink-0">
                         <div className="bg-slate-800/80 px-4 py-2 text-[10px] font-bold text-slate-400 border-b border-slate-700 flex justify-between items-center">
-                            <span className="uppercase tracking-widest">Monitor de Protocolo</span>
-                            <button onClick={() => setLogs([])} className="text-slate-500 hover:text-white">LIMPAR</button>
+                            <span className="uppercase tracking-widest">Consola de Diagnóstico</span>
+                            <button onClick={() => setLogs([])} className="text-slate-500 hover:text-white transition-colors">LIMPAR</button>
                         </div>
                         <div className="h-48 p-3 font-mono text-[10px] overflow-y-auto custom-scrollbar space-y-1 bg-black/40">
                             {logs.map((log, i) => (
                                 <div key={i} className={
                                     log.type === 'tx' ? 'text-blue-400' : 
-                                    log.type === 'success' ? 'text-green-400' : 
-                                    log.type === 'error' ? 'text-red-400 bg-red-500/5' : 
+                                    log.type === 'success' ? 'text-green-400 font-bold' : 
+                                    log.type === 'error' ? 'text-red-400 bg-red-500/10 px-1 rounded' : 
                                     'text-slate-500'
                                 }>
                                     <span className="opacity-30">[{log.timestamp}]</span> {log.message}
