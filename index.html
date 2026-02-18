@@ -76,13 +76,11 @@
                     return;
                 }
 
-                // Resposta Função 03 (Leitura): [FC] [ByteCount] [DataHi] [DataLo]
                 if (functionCode === 0x03 && data.length >= 3) {
                     const val = (data[2] << 8) | data[3];
                     addLog('success', `Valor Lido: ${val}`);
                 }
 
-                // Resposta Função 06 (Escrita): [FC] [AddrHi] [AddrLo] [DataHi] [DataLo]
                 if (functionCode === 0x06 && data.length >= 5) {
                     const val = (data[3] << 8) | data[4];
                     addLog('success', `Escrita Confirmada: ${val}`);
@@ -98,6 +96,8 @@
 
                 try {
                     addLog('info', 'A procurar inversor...');
+                    
+                    // CORREÇÃO: Adicionar os UUIDs ao requestDevice para garantir permissão de acesso
                     const device = await navigator.bluetooth.requestDevice({
                         filters: [
                             { namePrefix: 'CFW' }, 
@@ -111,10 +111,16 @@
                     addLog('info', `A ligar a ${device.name}...`);
                     const server = await device.gatt.connect();
                     
-                    // Aguardar inicialização do serviço
-                    await new Promise(r => setTimeout(r, 1000));
+                    // Aguardar inicialização do serviço (alguns dispositivos precisam de mais tempo)
+                    addLog('info', 'A descobrir serviços...');
+                    await new Promise(r => setTimeout(r, 1500));
 
                     const services = await server.getPrimaryServices();
+                    
+                    if (services.length === 0) {
+                        throw new Error("Nenhum serviço encontrado no dispositivo. Verifique se o BLE está ativo.");
+                    }
+
                     let foundChar = null;
 
                     for (const service of services) {
@@ -123,7 +129,6 @@
                         
                         for (const char of chars) {
                             const props = char.properties;
-                            // Precisamos de uma característica que aceite escrita e envie notificações (Full-Duplex)
                             if ((props.write || props.writeWithoutResponse) && (props.notify || props.indicate)) {
                                 foundChar = char;
                                 break;
@@ -132,7 +137,7 @@
                         if (foundChar) break;
                     }
 
-                    if (!foundChar) throw new Error("Não foi encontrada a porta de dados Modbus (UART over BLE).");
+                    if (!foundChar) throw new Error("Não foi encontrada a porta de dados Modbus compatível.");
 
                     addLog('info', `Porta encontrada: ...${foundChar.uuid.slice(-6).toUpperCase()}`);
                     
@@ -141,7 +146,7 @@
                     
                     setCharacteristic(foundChar);
                     setIsConnected(true);
-                    addLog('success', 'Comunicação Estabelecida! Use o PIN 123456 se pedido.');
+                    addLog('success', 'Comunicação Estabelecida!');
                     
                     device.addEventListener('gattserverdisconnected', () => {
                         setIsConnected(false);
@@ -167,7 +172,6 @@
                 const addr = parseInt(p.address);
                 const val = parseInt(p.value);
 
-                // Protocolo Modbus PDU (Sem CRC, pois o BLE já garante a integridade do pacote)
                 const payload = type === 'read' 
                     ? [0x03, (addr >> 8) & 0xFF, addr & 0xFF, 0x00, 0x01] 
                     : [0x06, (addr >> 8) & 0xFF, addr & 0xFF, (val >> 8) & 0xFF, val & 0xFF];
@@ -177,7 +181,6 @@
                 try {
                     addLog('tx', `TX (Hex): ${buf2hex(buffer)}`);
                     
-                    // Alguns dispositivos exigem escrita COM resposta para Modbus
                     if (characteristic.properties.write) {
                         await characteristic.writeValue(buffer);
                     } else {
